@@ -1,6 +1,6 @@
 import numpy as np
 import copy
-from opengcmc import Quaternion, PBC
+from opengcmc import Quaternion, PBC, PhahstFF
 from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce,\
     System, LangevinMiddleIntegrator, Context
 from openmm.unit import *
@@ -173,6 +173,7 @@ class GCMCSystem:
         self.write_xyz = True
         self.xyz_filename = "out.xyz"
         self._out_file = None
+        self._ff = PhahstFF()
 
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
@@ -203,7 +204,14 @@ class GCMCSystem:
                     charge = 0
                 atom = Atom(x, y, z, name, i - 2, charge=charge)
                 mof.append(atom)
+            self._ff.apply(mof.atoms)
             self.mols.append(mof)
+
+    def add_sorbate(self, sorbate):
+        if sorbate == "H2":
+            pass
+        else:
+            raise Exception("Unknown sorbate")
 
     def add_molecules_to_openmm_system(self):
         for mol in self.mols:
