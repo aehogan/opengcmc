@@ -54,7 +54,7 @@ class Atom:
         "Ts": 117, "Og": 118, "Da": 0,
     }
 
-    def __init__(self, x, y, z, name, atom_id=0, charge=0.0):
+    def __init__(self, x, y, z, name, atom_id=0, charge=0.0, virtual=False):
         self.name = name.strip()
         self.x = np.array([float(x), float(y), float(z)])
         element = "".join([i for i in self.name[:2] if i.isalpha()])
@@ -78,6 +78,7 @@ class Atom:
             self.bond_r = 2.0
             self.vdw = 3.0
 
+        self.virtual = virtual
         self.element = element
         self.charge = charge
         self.alpha = 0.0
@@ -97,13 +98,14 @@ class Atom:
 
 
 class Molecule:
-    def __init__(self, name="mol", atoms=None, charge=0, mult=1):
+    def __init__(self, name="mol", atoms=None, charge=0, mult=1, frozen=False):
         if atoms is None:
             atoms = []
         self.name = str(name)
         self.atoms = atoms
         self.charge = int(charge)
         self.mult = int(mult)
+        self.frozen = frozen
 
     def append(self, atom):
         self.atoms.append(atom)
@@ -178,7 +180,7 @@ class GCMCSystem:
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
             lines = [line.split() for line in f.readlines()]
-            mof = Molecule(name="MOF")
+            mof = Molecule(name="MOF", frozen=True)
             for i, line in enumerate(lines):
                 if i == 0:
                     continue
@@ -204,19 +206,27 @@ class GCMCSystem:
                     charge = 0
                 atom = Atom(x, y, z, name, i - 2, charge=charge)
                 mof.append(atom)
-            self._ff.apply(mof.atoms)
+            self._ff.apply(mof.atoms, self._ff.phahst)
             self.mols.append(mof)
 
     def add_sorbate(self, sorbate):
         if sorbate == "H2":
-            pass
+            h2 = Molecule()
+            h2.append(Atom(0.0, 0.0, 0.0, "DAH2", charge=-0.846166, virtual=True))
+            h2.append(Atom(0.371, 0.0, 0.0, "H2", charge=0.423083))
+            h2.append(Atom(-0.371, 0.0, 0.0, "H2", charge=0.423083))
+            self._ff.apply(h2, self._ff.phahst_h2)
+            self.mols.append(h2)
         else:
             raise Exception("Unknown sorbate")
 
     def add_molecules_to_openmm_system(self):
         for mol in self.mols:
-            for _ in mol:
-                self._omm_system.addParticle(0)
+            for atom in mol:
+                if mol.frozen:
+                    self._omm_system.addParticle(0)
+                else:
+                    self._omm_system.addParticle(atom.mass)
             for force in self._omm_system.getForces():
                 if isinstance(force, NonbondedForce):
                     for i, atom in enumerate(mol):
@@ -314,7 +324,7 @@ class GCMCSystem:
         positions = self._omm_state.getPositions(asNumpy=True)
         self._out_file.write("{}\n\n".format(int(len(atoms))))
         for i, atom in enumerate(atoms):
-            self._out_file.write("{} {} {} {}\n".format(atom.element, *(positions[i]._value)))
+            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value))
 
     def output(self):
         params = {"getPositions": False, "getEnergy": True}
