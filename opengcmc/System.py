@@ -63,20 +63,7 @@ class Atom:
         if element not in self.list_of_elements:
             element = element[0]
             if element not in self.list_of_elements:
-                print("!!! Invalid element {} !!!".format(name))
-
-        if element == "H":
-            self.bond_r = 0.8
-            self.vdw = 1.2
-        elif element == "O":
-            self.bond_r = 1.3
-            self.vdw = 1.8
-        elif element == "N" or element == "C":
-            self.bond_r = 1.6
-            self.vdw = 2.0
-        else:
-            self.bond_r = 2.0
-            self.vdw = 3.0
+                raise Exception("Couldn't find element {}".format(name))
 
         self.virtual = virtual
         self.element = element
@@ -93,18 +80,13 @@ class Atom:
         self.z = self.element_z[self.element]
         self.id = atom_id
 
-    def __str__(self):
-        return "Atom {} {} [{}]".format(self.element, self.id, self.x)
-
 
 class Molecule:
-    def __init__(self, name="mol", atoms=None, charge=0, mult=1, frozen=False):
+    def __init__(self, name="mol", atoms=None, frozen=False):
         if atoms is None:
             atoms = []
         self.name = str(name)
         self.atoms = atoms
-        self.charge = int(charge)
-        self.mult = int(mult)
         self.frozen = frozen
 
     def append(self, atom):
@@ -162,20 +144,37 @@ class Molecule:
 
 
 class GCMCSystem:
+    # Thermodynamic ensemble enum
+    uvt, npt, nvt, nve = range(4)
+
     def __init__(self):
+        self.ensemble = GCMCSystem.nvt
+        self.pressure = 1.0
+        self.temperature = 298.0
+        # Frequency of output
+        self.freq = 10
+        # Output f-string
+        self.format_string = "Step {step} KinE {kin_energy} PotE {pot_energy}"
+        # Write .xyz flag/filename
+        self.write_xyz = True
+        self.xyz_filename = "out.xyz"
+        # list of Molecule objects
         self.mols = []
+        # Current number of atoms
+        self._n = 0
+        # Current step number
+        self._step = 0
+
+        # internal objects
+        self._pbc = None
+        self._out_file = None
+        self._ff = PhahstFF()
+
+        # OpenMM objects
         self._omm_system = None
         self._omm_integrator = None
         self._omm_context = None
         self._omm_state = None
-        self._pbc = None
-        self._step = 0
-        self.freq = 10
-        self.format_string = "Step {step} KinE {kin_energy} PotE {pot_energy}"
-        self.write_xyz = True
-        self.xyz_filename = "out.xyz"
-        self._out_file = None
-        self._ff = PhahstFF()
 
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
@@ -204,7 +203,8 @@ class GCMCSystem:
                     charge = float(line[4])
                 else:
                     charge = 0
-                atom = Atom(x, y, z, name, i - 2, charge=charge)
+                atom = Atom(x, y, z, name, self._n, charge=charge)
+                self._n += 1
                 mof.append(atom)
             self._ff.apply(mof.atoms, self._ff.phahst)
             self.mols.append(mof)
@@ -212,10 +212,11 @@ class GCMCSystem:
     def add_sorbate(self, sorbate):
         if sorbate == "H2":
             h2 = Molecule()
-            h2.append(Atom(0.0, 0.0, 0.0, "DAH2", charge=-0.846166, virtual=True))
-            h2.append(Atom(0.371, 0.0, 0.0, "H2", charge=0.423083))
-            h2.append(Atom(-0.371, 0.0, 0.0, "H2", charge=0.423083))
+            h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True))
+            h2.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=self._n + 1, charge=0.423083))
+            h2.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=self._n + 2, charge=0.423083))
             self._ff.apply(h2, self._ff.phahst_h2)
+            self._n += 3
             self.mols.append(h2)
         else:
             raise Exception("Unknown sorbate")
@@ -229,21 +230,26 @@ class GCMCSystem:
                     self._omm_system.addParticle(atom.mass)
             for force in self._omm_system.getForces():
                 if isinstance(force, NonbondedForce):
-                    for i, atom in enumerate(mol):
+                    for atom in mol:
+                        i = atom.id
                         force.addParticle(atom.charge, atom.lj_sigma, atom.lj_epsilon)
-                        for j, atom2 in enumerate(mol):
+                        for atom2 in mol:
+                            j = atom2.id
                             if i <= j:
                                 continue
                             force.addException(i, j, 0, 0, 0)
                 elif isinstance(force, CustomNonbondedForce):
-                    for i, atom in enumerate(mol):
+                    for atom in mol:
                         force.addParticle((atom.c6, atom.c8, atom.c10, atom.beta, atom.rho))
-                        for j, atom2 in enumerate(mol):
+                        i = atom.id
+                        for atom2 in mol:
+                            j = atom2.id
                             if i <= j:
                                 continue
                             force.addExclusion(i, j)
                 elif isinstance(force, AmoebaMultipoleForce):
-                    for i, atom in enumerate(mol):
+                    for atom in mol:
+                        i = atom.id
                         force.addMultipole(atom.charge,
                                            (0.0, 0.0, 0.0),
                                            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -253,7 +259,7 @@ class GCMCSystem:
                                            atom.alpha ** (1 / 6),
                                            atom.alpha
                                            )
-                        other_atoms = [j for j, atom2 in enumerate(mol) if i != j]
+                        other_atoms = [atom2.id for atom2 in mol if i != atom2.id]
                         force.setCovalentMap(i, AmoebaMultipoleForce.Covalent12, other_atoms)
                         force.setCovalentMap(i, AmoebaMultipoleForce.PolarizationCovalent11, other_atoms)
 
@@ -340,7 +346,7 @@ class GCMCSystem:
     def step(self, steps):
         if self._omm_integrator is None:
             raise Exception("Integrator doesn't exist (add molecules and"
-                            "call create_openmm_context first)")
+                            "call create_openmm_context() first)")
         if self._step == 0:
             self.output()
         total_steps = self._step + steps
