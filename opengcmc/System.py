@@ -2,7 +2,7 @@ import numpy as np
 import copy
 from opengcmc import Quaternion, PBC, PhahstFF
 from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce,\
-    System, LangevinMiddleIntegrator, Context
+    System, NoseHooverIntegrator, Context, TwoParticleAverageSite
 from openmm.unit import *
 
 
@@ -54,7 +54,7 @@ class Atom:
         "Ts": 117, "Og": 118, "Da": 0,
     }
 
-    def __init__(self, x, y, z, name, atom_id=0, charge=0.0, virtual=False):
+    def __init__(self, x, y, z, name, atom_id=0, charge=0.0, virtual=False, virtual_type=None):
         self.name = name.strip()
         self.x = np.array([float(x), float(y), float(z)])
         element = "".join([i for i in self.name[:2] if i.isalpha()])
@@ -66,6 +66,7 @@ class Atom:
                 raise Exception("Couldn't find element {}".format(name))
 
         self.virtual = virtual
+        self.virtual_type = virtual_type
         self.element = element
         self.charge = charge
         self.alpha = 0.0
@@ -149,8 +150,8 @@ class GCMCSystem:
 
     def __init__(self):
         self.ensemble = GCMCSystem.nvt
-        self.pressure = 1.0
-        self.temperature = 298.0
+        self.pressure = 1.0 * atmospheres
+        self.temperature = 298.0 * kelvins
         # Frequency of output
         self.freq = 10
         # Output f-string
@@ -175,6 +176,7 @@ class GCMCSystem:
         self._omm_integrator = None
         self._omm_context = None
         self._omm_state = None
+        self._constraints = []
 
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
@@ -212,9 +214,11 @@ class GCMCSystem:
     def add_sorbate(self, sorbate):
         if sorbate == "H2":
             h2 = Molecule()
-            h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True))
-            h2.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=self._n + 1, charge=0.423083))
-            h2.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=self._n + 2, charge=0.423083))
+            h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True,
+                           virtual_type=TwoParticleAverageSite(self._n+1, self._n+2, 0.5, 0.5)))
+            h2.append(Atom(0.371, 0.0, 5.0, "H2", atom_id=self._n+1, charge=0.423083))
+            h2.append(Atom(-0.371, 0.0, 5.0, "H2", atom_id=self._n+2, charge=0.423083))
+            self._constraints.append([self._n+1, self._n+2, 2*0.371])
             self._ff.apply(h2, self._ff.phahst_h2)
             self._n += 3
             self.mols.append(h2)
@@ -228,6 +232,8 @@ class GCMCSystem:
                     self._omm_system.addParticle(0)
                 else:
                     self._omm_system.addParticle(atom.mass)
+                if atom.virtual:
+                    self._omm_system.setVirtualSite(atom.id, atom.virtual_type)
             for force in self._omm_system.getForces():
                 if isinstance(force, NonbondedForce):
                     for atom in mol:
@@ -262,6 +268,8 @@ class GCMCSystem:
                         other_atoms = [atom2.id for atom2 in mol if i != atom2.id]
                         force.setCovalentMap(i, AmoebaMultipoleForce.Covalent12, other_atoms)
                         force.setCovalentMap(i, AmoebaMultipoleForce.PolarizationCovalent11, other_atoms)
+        for constraint in self._constraints:
+            self._omm_system.addConstraint(*constraint)
 
     def create_openmm_context(self):
         self._omm_system = System()
@@ -313,7 +321,7 @@ class GCMCSystem:
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
         self._omm_system.addForce(mp_force)
-        self._omm_integrator = LangevinMiddleIntegrator(300 * kelvin, 1 / picosecond, 0.001 * picoseconds)
+        self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, 0.001 * picoseconds)
         self.add_molecules_to_openmm_system()
         self._omm_context = Context(self._omm_system, self._omm_integrator)
         positions = np.row_stack([mol.get_positions() for mol in self.mols])
