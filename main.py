@@ -12,4 +12,4 @@ except ImportError:
 system = GCMCSystem()
 system.load_material_xyz("hkust1.xyz")
 system.create_openmm_context()
-system.step(10)
+system.step(100)

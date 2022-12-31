@@ -162,10 +162,17 @@ class Molecule:
 class GCMCSystem:
     def __init__(self):
         self.mols = []
-        self.omm_system = None
-        self.omm_integrator = None
-        self.omm_context = None
-        self.pbc = None
+        self._omm_system = None
+        self._omm_integrator = None
+        self._omm_context = None
+        self._omm_state = None
+        self._pbc = None
+        self._step = 0
+        self.freq = 10
+        self.format_string = "Step {step} KinE {kin_energy} PotE {pot_energy}"
+        self.write_xyz = True
+        self.xyz_filename = "out.xyz"
+        self._out_file = None
 
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
@@ -182,9 +189,9 @@ class GCMCSystem:
                         alpha = float(line[3])
                         beta = float(line[4])
                         gamma = float(line[5])
-                        self.pbc = PBC(a, b, c, alpha, beta, gamma)
+                        self._pbc = PBC(a, b, c, alpha, beta, gamma)
                     except ValueError:
-                        self.pbc = PBC(100, 100, 100, 90, 90, 90)
+                        self._pbc = PBC(100, 100, 100, 90, 90, 90)
                     continue
                 name = line[0]
                 x = float(line[1])
@@ -201,8 +208,8 @@ class GCMCSystem:
     def add_molecules_to_openmm_system(self):
         for mol in self.mols:
             for _ in mol:
-                self.omm_system.addParticle(0)
-            for force in self.omm_system.getForces():
+                self._omm_system.addParticle(0)
+            for force in self._omm_system.getForces():
                 if isinstance(force, NonbondedForce):
                     for i, atom in enumerate(mol):
                         force.addParticle(atom.charge, atom.lj_sigma, atom.lj_epsilon)
@@ -233,7 +240,7 @@ class GCMCSystem:
                         force.setCovalentMap(i, AmoebaMultipoleForce.PolarizationCovalent11, other_atoms)
 
     def create_openmm_context(self):
-        self.omm_system = System()
+        self._omm_system = System()
         tt_force = CustomNonbondedForce(
             "repulsion - ttdamp6*c6*invR6 - ttdamp8*c8*invR8 - ttdamp10*c10*invR10;"
             "repulsion = forceAtZero*invbeta*exp(-beta*(r-rho));"
@@ -276,20 +283,54 @@ class GCMCSystem:
         tt_force.setCutoffDistance(0.9)
         tt_force.setNonbondedMethod(CustomNonbondedForce.CutoffPeriodic)
         tt_force.setUseLongRangeCorrection(False)
-        self.omm_system.addForce(tt_force)
+        self._omm_system.addForce(tt_force)
         mp_force = AmoebaMultipoleForce()
         mp_force.setNonbondedMethod(AmoebaMultipoleForce.PME)
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
-        self.omm_system.addForce(mp_force)
-        self.omm_integrator = LangevinMiddleIntegrator(300*kelvin, 1/picosecond, 0.001*picoseconds)
+        self._omm_system.addForce(mp_force)
+        self._omm_integrator = LangevinMiddleIntegrator(300 * kelvin, 1 / picosecond, 0.001 * picoseconds)
         self.add_molecules_to_openmm_system()
-        self.omm_context = Context(self.omm_system, self.omm_integrator)
+        self._omm_context = Context(self._omm_system, self._omm_integrator)
         positions = np.row_stack([mol.get_positions() for mol in self.mols])
-        self.omm_context.setPositions(positions)
-        self.omm_context.setVelocitiesToTemperature(298)
-        self.omm_context.setPeriodicBoxVectors(*(self.pbc.basis_matrix * nanometers/10))
+        self._omm_context.setPositions(positions)
+        self._omm_context.setVelocitiesToTemperature(298)
+        self._omm_context.setPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
+
+    def output_xyz(self):
+        if self._out_file is None:
+            self._out_file = open(self.xyz_filename, "w")
+        atoms = []
+        for mol in self.mols:
+            atoms += mol.atoms
+        positions = self._omm_state.getPositions(asNumpy=True)
+        self._out_file.write("{}\n\n".format(int(len(atoms))))
+        for i, atom in enumerate(atoms):
+            self._out_file.write("{} {} {} {}\n".format(atom.element, *(positions[i]._value)))
+
+    def output(self):
+        params = {"getPositions": False, "getEnergy": True}
+        if self.write_xyz:
+            params["getPositions"] = True
+        self._omm_state = self._omm_context.getState(**params)
+        if self.write_xyz:
+            self.output_xyz()
+        print(self.format_string.format(step=self._step,
+                                        kin_energy=self._omm_state.getKineticEnergy(),
+                                        pot_energy=self._omm_state.getPotentialEnergy()))
 
     def step(self, steps):
-        if self.omm_integrator is not None:
-            self.omm_integrator.step(steps)
+        if self._omm_integrator is None:
+            raise Exception("Integrator doesn't exist (add molecules and"
+                            "call create_openmm_context first)")
+        if self._step == 0:
+            self.output()
+        total_steps = self._step + steps
+        while self._step < total_steps:
+            if self._step + self.freq <= total_steps:
+                delta_steps = self.freq
+            else:
+                delta_steps = total_steps - self._step
+            self._omm_integrator.step(delta_steps)
+            self._step += delta_steps
+            self.output()
