@@ -8,4 +8,5 @@ system = GCMCSystem()
 system.load_material_xyz("hkust1.xyz")
 system.add_sorbate("H2")
 system.create_openmm_context()
-system.step(100)
+system.freq = 1000
+system.step(10000)

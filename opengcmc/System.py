@@ -2,7 +2,7 @@ import numpy as np
 import copy
 from opengcmc import Quaternion, PBC, PhahstFF
 from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce,\
-    System, NoseHooverIntegrator, Context, TwoParticleAverageSite
+    System, NoseHooverIntegrator, Context, TwoParticleAverageSite, XmlSerializer
 from openmm.unit import *
 
 
@@ -216,9 +216,9 @@ class GCMCSystem:
             h2 = Molecule()
             h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True,
                            virtual_type=TwoParticleAverageSite(self._n+1, self._n+2, 0.5, 0.5)))
-            h2.append(Atom(0.371, 0.0, 5.0, "H2", atom_id=self._n+1, charge=0.423083))
-            h2.append(Atom(-0.371, 0.0, 5.0, "H2", atom_id=self._n+2, charge=0.423083))
-            self._constraints.append([self._n+1, self._n+2, 2*0.371])
+            h2.append(Atom(0.0371, 0.0, 0.0, "H2", atom_id=self._n+1, charge=0.423083))
+            h2.append(Atom(-0.0371, 0.0, 0.0, "H2", atom_id=self._n+2, charge=0.423083))
+            self._constraints.append([self._n+1, self._n+2, 2*0.0371])
             self._ff.apply(h2, self._ff.phahst_h2)
             self._n += 3
             self.mols.append(h2)
@@ -312,22 +312,25 @@ class GCMCSystem:
         tt_force.addPerParticleParameter("beta")
         tt_force.addPerParticleParameter("rho")
         tt_force.addGlobalParameter("forceAtZero", 49.6144931952)  # kJ/(mol*A)
-        tt_force.setCutoffDistance(0.9)
+        tt_force.setCutoffDistance(1.2)
         tt_force.setNonbondedMethod(CustomNonbondedForce.CutoffPeriodic)
         tt_force.setUseLongRangeCorrection(False)
         self._omm_system.addForce(tt_force)
         mp_force = AmoebaMultipoleForce()
         mp_force.setNonbondedMethod(AmoebaMultipoleForce.PME)
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
-        mp_force.setCutoffDistance(0.9)
-        self._omm_system.addForce(mp_force)
+        mp_force.setCutoffDistance(1.2)
+        # self._omm_system.addForce(mp_force)
         self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, 0.001 * picoseconds)
         self.add_molecules_to_openmm_system()
+        self._omm_system.setDefaultPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
         self._omm_context = Context(self._omm_system, self._omm_integrator)
         positions = np.row_stack([mol.get_positions() for mol in self.mols])
         self._omm_context.setPositions(positions)
         self._omm_context.setVelocitiesToTemperature(298)
-        self._omm_context.setPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
+        f = open("state.xml", "w")
+        f.write(XmlSerializer.serialize(self._omm_system))
+        f.close()
 
     def output_xyz(self):
         if self._out_file is None:
@@ -338,10 +341,10 @@ class GCMCSystem:
         positions = self._omm_state.getPositions(asNumpy=True)
         self._out_file.write("{}\n\n".format(int(len(atoms))))
         for i, atom in enumerate(atoms):
-            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value))
+            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value*10))
 
     def output(self):
-        params = {"getPositions": False, "getEnergy": True}
+        params = {"getPositions": False, "getEnergy": True, "enforcePeriodicBox": True}
         if self.write_xyz:
             params["getPositions"] = True
         self._omm_state = self._omm_context.getState(**params)
