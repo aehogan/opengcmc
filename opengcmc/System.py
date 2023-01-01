@@ -108,6 +108,15 @@ class Molecule:
     def get_positions(self):
         return np.row_stack([atom.x for atom in self.atoms])
 
+    def to_name(self):
+        elements, counts = np.unique([atom.element for atom in self.atoms], return_counts=True)
+        name = ""
+        for i, element in enumerate(elements):
+            name += element + str(counts[i])
+            if i != len(elements) - 1:
+                name += " "
+        return name
+
     def move_to_com(self):
         com = np.zeros(3)
         total_mass = 0
@@ -147,15 +156,18 @@ class Molecule:
 class GCMCSystem:
     # Thermodynamic ensemble enum
     uvt, npt, nvt, nve = range(4)
+    ensemble_to_name = {0: "muVT", 1: "NPT", 2: "NVT", 3: "NVE"}
 
     def __init__(self):
         self.ensemble = GCMCSystem.nvt
         self.pressure = 1.0 * atmospheres
         self.temperature = 298.0 * kelvins
+        # Delta time(step)
+        self.dt = 0.001 * picoseconds
         # Frequency of output
         self.freq = 10
         # Output f-string
-        self.format_string = "Step {step} KinE {kin_energy} PotE {pot_energy}"
+        self.format_string = "Step {step} Time {time} KinE {kin_energy} PotE {pot_energy}"
         # Write .xyz flag/filename
         self.write_xyz = True
         self.xyz_filename = "out.xyz"
@@ -312,16 +324,16 @@ class GCMCSystem:
         tt_force.addPerParticleParameter("beta")
         tt_force.addPerParticleParameter("rho")
         tt_force.addGlobalParameter("forceAtZero", 49.6144931952)  # kJ/(mol*A)
-        tt_force.setCutoffDistance(1.2)
+        tt_force.setCutoffDistance(0.9)
         tt_force.setNonbondedMethod(CustomNonbondedForce.CutoffPeriodic)
         tt_force.setUseLongRangeCorrection(False)
         self._omm_system.addForce(tt_force)
         mp_force = AmoebaMultipoleForce()
         mp_force.setNonbondedMethod(AmoebaMultipoleForce.PME)
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
-        mp_force.setCutoffDistance(1.2)
-        # self._omm_system.addForce(mp_force)
-        self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, 0.001 * picoseconds)
+        mp_force.setCutoffDistance(0.9)
+        #self._omm_system.addForce(mp_force)
+        self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
         self.add_molecules_to_openmm_system()
         self._omm_system.setDefaultPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
         self._omm_context = Context(self._omm_system, self._omm_integrator)
@@ -343,16 +355,33 @@ class GCMCSystem:
         for i, atom in enumerate(atoms):
             self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value*10))
 
+    def initial_output(self):
+        print(" --- OpenGCMC ---")
+        print("{} ensemble".format(self.ensemble_to_name[self.ensemble]))
+        print("dt: {} integrator: {}".format(self.dt, self._omm_integrator.__class__.__name__))
+        print("{} atoms in {} molecules".format(self._n, len(self.mols)))
+        mol_names = [mol.to_name() for mol in self.mols]
+        mol_names, counts = np.unique(mol_names, return_counts=True)
+        for i, mol_name in enumerate(mol_names):
+            print(" → {}x {}".format(counts[i], mol_name))
+        print(" ----------------")
+
     def output(self):
+        if self._step == 0:
+            self.initial_output()
         params = {"getPositions": False, "getEnergy": True, "enforcePeriodicBox": True}
         if self.write_xyz:
             params["getPositions"] = True
         self._omm_state = self._omm_context.getState(**params)
         if self.write_xyz:
             self.output_xyz()
+        total_time = np.round((self._step * self.dt)._value, 1) * picosecond
+        kin_energy = np.round(self._omm_state.getKineticEnergy()._value, 4) * kilojoule_per_mole
+        pot_energy = np.round(self._omm_state.getPotentialEnergy()._value, 4) * kilojoule_per_mole
         print(self.format_string.format(step=self._step,
-                                        kin_energy=self._omm_state.getKineticEnergy(),
-                                        pot_energy=self._omm_state.getPotentialEnergy()))
+                                        time=total_time,
+                                        kin_energy=kin_energy,
+                                        pot_energy=pot_energy))
 
     def step(self, steps):
         if self._omm_integrator is None:
