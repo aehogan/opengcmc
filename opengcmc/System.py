@@ -228,9 +228,11 @@ class GCMCSystem:
             h2 = Molecule()
             h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True,
                            virtual_type=TwoParticleAverageSite(self._n+1, self._n+2, 0.5, 0.5)))
-            h2.append(Atom(0.0371, 0.0, 0.0, "H2", atom_id=self._n+1, charge=0.423083))
-            h2.append(Atom(-0.0371, 0.0, 0.0, "H2", atom_id=self._n+2, charge=0.423083))
-            self._constraints.append([self._n+1, self._n+2, 2*0.0371])
+            h2.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=self._n+1, charge=0.423083))
+            h2.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=self._n+2, charge=0.423083))
+            for atom in h2:
+                atom.x += 26.343 / 2
+            self._constraints.append([self._n+1, self._n+2, 2*0.371/10])
             self._ff.apply(h2, self._ff.phahst_h2)
             self._n += 3
             self.mols.append(h2)
@@ -332,12 +334,13 @@ class GCMCSystem:
         mp_force.setNonbondedMethod(AmoebaMultipoleForce.PME)
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
-        #self._omm_system.addForce(mp_force)
+        self._omm_system.addForce(mp_force)
         self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
         self.add_molecules_to_openmm_system()
         self._omm_system.setDefaultPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
         self._omm_context = Context(self._omm_system, self._omm_integrator)
         positions = np.row_stack([mol.get_positions() for mol in self.mols])
+        positions *= nanometers / 10
         self._omm_context.setPositions(positions)
         self._omm_context.setVelocitiesToTemperature(298)
         f = open("state.xml", "w")
@@ -358,6 +361,17 @@ class GCMCSystem:
     def initial_output(self):
         print(" --- OpenGCMC ---")
         print("{} ensemble".format(self.ensemble_to_name[self.ensemble]))
+        print("Cell basis matrix\n[ {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f} ]".format(
+            self._pbc.basis_matrix[0][0],
+            self._pbc.basis_matrix[0][1],
+            self._pbc.basis_matrix[0][2],
+            self._pbc.basis_matrix[1][0],
+            self._pbc.basis_matrix[1][1],
+            self._pbc.basis_matrix[1][2],
+            self._pbc.basis_matrix[2][0],
+            self._pbc.basis_matrix[2][1],
+            self._pbc.basis_matrix[2][2],
+        ))
         print("dt: {} integrator: {}".format(self.dt, self._omm_integrator.__class__.__name__))
         print("{} atoms in {} molecules".format(self._n, len(self.mols)))
         mol_names = [mol.to_name() for mol in self.mols]

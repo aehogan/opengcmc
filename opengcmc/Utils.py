@@ -175,3 +175,8 @@ class Quaternion:
         result = vec * q.get_conjugate()
         result = q * result
         return result.x[:3]
+
+
+class Modeler:
+    def __init__(self):
+        pass
