@@ -1,5 +1,6 @@
 import numpy as np
 import copy
+import time
 from opengcmc import Quaternion, PBC, PhahstFF
 from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce,\
     System, NoseHooverIntegrator, Context, TwoParticleAverageSite, XmlSerializer
@@ -167,7 +168,8 @@ class GCMCSystem:
         # Frequency of output
         self.freq = 10
         # Output f-string
-        self.format_string = "Step {step} Time {time} KinE {kin_energy} PotE {pot_energy}"
+        self.format_string = "Step {step:6d} Time {time:5.1f} ps KE {kin_energy:6.3f} kJ/mol " \
+                             "PE {pot_energy:10.3f} kJ/mol Elapsed time {elapsed_s:5.1f}s - {ns_per_day:5.2f} ns/day"
         # Write .xyz flag/filename
         self.write_xyz = True
         self.xyz_filename = "out.xyz"
@@ -182,6 +184,7 @@ class GCMCSystem:
         self._pbc = None
         self._out_file = None
         self._ff = PhahstFF()
+        self._start_time = time.perf_counter()
 
         # OpenMM objects
         self._omm_system = None
@@ -359,6 +362,7 @@ class GCMCSystem:
             self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value*10))
 
     def initial_output(self):
+        self._start_time = time.perf_counter()
         print(" --- OpenGCMC ---")
         print("{} ensemble".format(self.ensemble_to_name[self.ensemble]))
         print("Cell basis matrix\n[ {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f} ]".format(
@@ -381,21 +385,24 @@ class GCMCSystem:
         print(" ----------------")
 
     def output(self):
+        current_time = (self._step * self.dt)._value
         if self._step == 0:
             self.initial_output()
+            ns_per_day = 0
+        else:
+            ns_per_day = current_time / (time.perf_counter() - self._start_time) / 1000 * 86400
         params = {"getPositions": False, "getEnergy": True, "enforcePeriodicBox": True}
         if self.write_xyz:
             params["getPositions"] = True
         self._omm_state = self._omm_context.getState(**params)
         if self.write_xyz:
             self.output_xyz()
-        total_time = np.round((self._step * self.dt)._value, 1) * picosecond
-        kin_energy = np.round(self._omm_state.getKineticEnergy()._value, 4) * kilojoule_per_mole
-        pot_energy = np.round(self._omm_state.getPotentialEnergy()._value, 4) * kilojoule_per_mole
         print(self.format_string.format(step=self._step,
-                                        time=total_time,
-                                        kin_energy=kin_energy,
-                                        pot_energy=pot_energy))
+                                        time=current_time,
+                                        kin_energy=self._omm_state.getKineticEnergy()._value,
+                                        pot_energy=self._omm_state.getPotentialEnergy()._value,
+                                        elapsed_s=time.perf_counter()-self._start_time,
+                                        ns_per_day=ns_per_day))
 
     def step(self, steps):
         if self._omm_integrator is None:

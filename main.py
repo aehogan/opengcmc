@@ -8,5 +8,5 @@ system.load_material_xyz("hkust1.xyz")
 system.add_sorbate("H2")
 system.temperature = 50 * kelvin
 system.create_openmm_context()
-system.freq = 10
-system.step(10000)
+system.freq = 100
+system.step(1000)
