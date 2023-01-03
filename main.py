@@ -11,5 +11,7 @@ system.dt = 0.002 * picoseconds
 system.temperature = 50 * kelvin
 # system.ensemble = GCMCSystem.nve
 system.create_openmm_context()
-system.freq = 100
-system.step(1000)
+# system.freq = 100
+# system.step(1000)
+system.freq = 10
+system.hybrid_mc_step(1000)

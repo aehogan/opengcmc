@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import time
 from .Atom import Atom, Molecule
@@ -294,8 +296,33 @@ class GCMCSystem:
             self._step += delta_steps
             self.output()
 
-    def hybrid_mc_step(self, steps):
-        pass
+    def hybrid_mc_step(self, steps, md_steps=100):
+        if self._omm_integrator is None:
+            raise Exception("Integrator doesn't exist (add molecules and"
+                            "call create_openmm_context() first)")
+
+        if self._step == 0:
+            self.output()
+        total_steps = self._step + steps
+        while self._step < total_steps:
+
+            self._omm_state = self._omm_context.getState(getEnergy=True, getPositions=True)
+            old_pot_energy = self._omm_state.getPotentialEnergy()
+            old_positions = self._omm_state.getPositions(asNumpy=True)
+            self._omm_context.setVelocitiesToTemperature(self.temperature)
+            self._omm_integrator.step(md_steps)
+            new_state = self._omm_context.getState(getEnergy=True)
+            new_pot_energy = new_state.getPotentialEnergy()
+            delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
+                      old_pot_energy.value_in_unit(kilojoule_per_mole)
+            boltzmann_factor = np.exp(-delta_e/(self.temperature.value_in_unit(kelvins) * 0.008314462618))
+
+            if random.random() > boltzmann_factor:
+                self._omm_context.setPositions(old_positions)
+
+            self._step += 1
+            if self._step % self.freq == 0:
+                self.output()
 
     def muvt_steps(self, steps):
         pass
