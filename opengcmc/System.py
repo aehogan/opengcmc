@@ -273,6 +273,12 @@ class GCMCSystem:
                                         ns_per_day=ns_per_day))
 
     def step(self, steps):
+        if self.ensemble == GCMCSystem.uvt:
+            self.hybrid_mc_step(steps)
+        else:
+            self.md_step(steps)
+
+    def md_step(self, steps):
         if self._omm_integrator is None:
             raise Exception("Integrator doesn't exist (add molecules and"
                             "call create_openmm_context() first)")
@@ -287,3 +293,9 @@ class GCMCSystem:
             self._omm_integrator.step(delta_steps)
             self._step += delta_steps
             self.output()
+
+    def hybrid_mc_step(self, steps):
+        pass
+
+    def muvt_steps(self, steps):
+        pass
