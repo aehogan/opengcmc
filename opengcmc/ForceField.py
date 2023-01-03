@@ -1,4 +1,25 @@
 
+from .Atom import Atom, Molecule
+from openmm import TwoParticleAverageSite
+
+
+class Sorbate:
+    def __init__(self, base_id):
+        self.molecule = Molecule()
+        self.constraints = []
+        self.base_id = base_id
+
+
+class H2(Sorbate):
+    def __init__(self, base_id):
+        super().__init__(base_id)
+        self.molecule.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=base_id, charge=-0.846166, virtual=True,
+                             virtual_type=TwoParticleAverageSite(base_id + 1, base_id + 2, 0.5, 0.5)))
+        self.molecule.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=base_id + 1, charge=0.423083))
+        self.molecule.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=base_id + 2, charge=0.423083))
+        PhahstFF.apply_ff(self.molecule, PhahstFF.phahst_h2)
+        self.constraints.append([base_id + 1, base_id + 2, 2 * 0.371 / 10])
+
 
 class PhahstFF:
     phahst = {

@@ -128,7 +128,7 @@ class PBC:
 
 class Quaternion:
     def __init__(self, x=0.0, y=0.0, z=0.0, w=1.0):
-        self.x = np.array([x, y, z, w])
+        self.x = np.array([x, y, z, w], dtype=float)
 
     def normalize(self):
         magnitude = np.linalg.norm(self.x)
