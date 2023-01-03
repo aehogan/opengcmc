@@ -133,7 +133,7 @@ class GCMCSystem:
         # Frequency of output
         self.freq = 10
         # Output f-string
-        self.format_string = "Step {step:6d} Time {time:5.1f} ps " \
+        self.format_string = "Step {step:6d} Time {time:6.2f} ps " \
                              "TE {tot_energy:10.3f} kJ/mol " \
                              "KE {kin_energy:6.3f} kJ/mol " \
                              "PE {pot_energy:10.3f} kJ/mol " \
@@ -161,6 +161,9 @@ class GCMCSystem:
         self._omm_state = None
         self._constraints = []
 
+    def create_box(self, a, b, c, alpha, beta, gamma):
+        self._pbc = PBC(a, b, c, alpha, beta, gamma)
+
     def load_material_xyz(self, filename):
         with open(filename, "r") as f:
             lines = [line.split() for line in f.readlines()]
@@ -178,7 +181,8 @@ class GCMCSystem:
                         gamma = float(line[5])
                         self._pbc = PBC(a, b, c, alpha, beta, gamma)
                     except ValueError:
-                        self._pbc = PBC(100, 100, 100, 90, 90, 90)
+                        if self._pbc is None:
+                            self._pbc = PBC(100, 100, 100, 90, 90, 90)
                     continue
                 name = line[0]
                 x = float(line[1])
@@ -257,6 +261,7 @@ class GCMCSystem:
             self._omm_system.addConstraint(*constraint)
 
     def create_openmm_context(self):
+        self._start_time = time.perf_counter()
         self._omm_system = System()
         tt_force = CustomNonbondedForce(
             "repulsion - ttdamp6*c6*invR6 - ttdamp8*c8*invR8 - ttdamp10*c10*invR10;"
@@ -322,6 +327,7 @@ class GCMCSystem:
         f = open("state.xml", "w")
         f.write(XmlSerializer.serialize(self._omm_system))
         f.close()
+        print("OpenMM Context creation time {:5.2f} s".format(time.perf_counter()-self._start_time))
 
     def output_xyz(self):
         if self._out_file is None:
@@ -332,7 +338,7 @@ class GCMCSystem:
         positions = self._omm_state.getPositions(asNumpy=True)
         self._out_file.write("{}\n\n".format(int(len(atoms))))
         for i, atom in enumerate(atoms):
-            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value * 10))
+            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i].value_in_unit(angstroms)))
 
     def initial_output(self):
         self._start_time = time.perf_counter()
@@ -360,22 +366,22 @@ class GCMCSystem:
         print(" ----------------")
 
     def output(self):
-        current_time = (self._step * self.dt)._value
+        current_time = (self._step * self.dt).value_in_unit(nanoseconds)
         if self._step == 0:
             self.initial_output()
             ns_per_day = 0
         else:
-            ns_per_day = current_time / (time.perf_counter() - self._start_time) / 1000 * 86400
-        params = {"getPositions": False, "getEnergy": True, "enforcePeriodicBox": True}
+            ns_per_day = current_time / (time.perf_counter() - self._start_time) * 86400
+        kargs = {"getPositions": False, "getEnergy": True, "enforcePeriodicBox": True}
         if self.write_xyz:
-            params["getPositions"] = True
-        self._omm_state = self._omm_context.getState(**params)
+            kargs["getPositions"] = True
+        self._omm_state = self._omm_context.getState(**kargs)
         if self.write_xyz:
             self.output_xyz()
-        kin_energy = self._omm_state.getKineticEnergy()._value
-        pot_energy = self._omm_state.getPotentialEnergy()._value
+        kin_energy = self._omm_state.getKineticEnergy().value_in_unit(kilojoule_per_mole)
+        pot_energy = self._omm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
         print(self.format_string.format(step=self._step,
-                                        time=current_time,
+                                        time=current_time * 1000,  # ns to ps
                                         tot_energy=kin_energy+pot_energy,
                                         kin_energy=kin_energy,
                                         pot_energy=pot_energy,

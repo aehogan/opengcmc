@@ -194,6 +194,7 @@ class Modeler:
 
     @staticmethod
     def move_mol_randomly(input_mol, pbc):
+        Modeler.move_mol_to_com(input_mol)
         random_rot = Quaternion()
         random_rot.random_rotation()
         random_scale = np.random.random(3)
