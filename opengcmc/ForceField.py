@@ -65,7 +65,7 @@ class PhahstFF:
         pass
 
     @staticmethod
-    def apply(atoms, ff):
+    def apply_ff(atoms, ff):
         for atom in atoms:
             try:
                 atom.mass = ff[atom.element]["mass"]

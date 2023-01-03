@@ -1,9 +1,9 @@
 import numpy as np
-import copy
 import time
-from opengcmc import Quaternion, PBC, PhahstFF
-from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce,\
-    System, NoseHooverIntegrator, Context, TwoParticleAverageSite, XmlSerializer
+from opengcmc import PBC, PhahstFF, Modeler
+from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce, \
+    System, NoseHooverIntegrator, Context, TwoParticleAverageSite, XmlSerializer, \
+    VerletIntegrator
 from openmm.unit import *
 
 
@@ -118,41 +118,6 @@ class Molecule:
                 name += " "
         return name
 
-    def move_to_com(self):
-        com = np.zeros(3)
-        total_mass = 0
-        for atom in self.atoms:
-            com += atom.x * atom.mass
-            total_mass += atom.mass
-        com /= total_mass
-        for atom in self.atoms:
-            atom.x -= com
-
-    def point_molecule_down_xaxis(self, atom_index):
-
-        pointer_atom = copy.deepcopy(self.atoms[atom_index])
-
-        xangle = np.arctan2(pointer_atom.x[1], pointer_atom.x[0])
-        qx = Quaternion(0.0, 0.0, 0.0, 1.0)
-        qx.axis_angle(0, 0, 1, -np.rad2deg(xangle))
-
-        pointer_atom.x = Quaternion.rotate_3vector(pointer_atom.x, qx)
-
-        yangle = np.arctan2(pointer_atom.x[2], pointer_atom.x[0])
-        qy = Quaternion(0.0, 0.0, 0.0, 1.0)
-        qy.axis_angle(0, 1, 0, np.rad2deg(yangle))
-
-        pointer_atom.x = Quaternion.rotate_3vector(pointer_atom.x, qy)
-
-        for atom in self.atoms:
-            atom.x = Quaternion.rotate_3vector(atom.x, qx)
-            atom.x = Quaternion.rotate_3vector(atom.x, qy)
-            atom.x -= pointer_atom.x
-
-    def invert(self):
-        for atom in self.atoms:
-            atom.x = -atom.x
-
 
 class GCMCSystem:
     # Thermodynamic ensemble enum
@@ -168,8 +133,11 @@ class GCMCSystem:
         # Frequency of output
         self.freq = 10
         # Output f-string
-        self.format_string = "Step {step:6d} Time {time:5.1f} ps KE {kin_energy:6.3f} kJ/mol " \
-                             "PE {pot_energy:10.3f} kJ/mol Elapsed time {elapsed_s:5.1f}s - {ns_per_day:5.2f} ns/day"
+        self.format_string = "Step {step:6d} Time {time:5.1f} ps " \
+                             "TE {tot_energy:10.3f} kJ/mol " \
+                             "KE {kin_energy:6.3f} kJ/mol " \
+                             "PE {pot_energy:10.3f} kJ/mol " \
+                             "Elapsed time {elapsed_s:5.1f}s - {ns_per_day:5.2f} ns/day"
         # Write .xyz flag/filename
         self.write_xyz = True
         self.xyz_filename = "out.xyz"
@@ -223,20 +191,20 @@ class GCMCSystem:
                 atom = Atom(x, y, z, name, self._n, charge=charge)
                 self._n += 1
                 mof.append(atom)
-            self._ff.apply(mof.atoms, self._ff.phahst)
+            self._ff.apply_ff(mof.atoms, self._ff.phahst)
             self.mols.append(mof)
 
     def add_sorbate(self, sorbate):
         if sorbate == "H2":
             h2 = Molecule()
             h2.append(Atom(0.0, 0.0, 0.0, "DAH2", atom_id=self._n, charge=-0.846166, virtual=True,
-                           virtual_type=TwoParticleAverageSite(self._n+1, self._n+2, 0.5, 0.5)))
-            h2.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=self._n+1, charge=0.423083))
-            h2.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=self._n+2, charge=0.423083))
-            for atom in h2:
-                atom.x += 26.343 / 2
-            self._constraints.append([self._n+1, self._n+2, 2*0.371/10])
-            self._ff.apply(h2, self._ff.phahst_h2)
+                           virtual_type=TwoParticleAverageSite(self._n + 1, self._n + 2, 0.5, 0.5)))
+            h2.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=self._n + 1, charge=0.423083))
+            h2.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=self._n + 2, charge=0.423083))
+            while Modeler.overlap_mol_test(h2, self.mols, self._pbc):
+                Modeler.move_mol_randomly(h2, self._pbc)
+            self._constraints.append([self._n + 1, self._n + 2, 2 * 0.371 / 10])
+            self._ff.apply_ff(h2, self._ff.phahst_h2)
             self._n += 3
             self.mols.append(h2)
         else:
@@ -338,7 +306,12 @@ class GCMCSystem:
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
         self._omm_system.addForce(mp_force)
-        self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
+        if self.ensemble == GCMCSystem.nvt or self.ensemble == GCMCSystem.npt or self.ensemble == GCMCSystem.uvt:
+            self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
+        elif self.ensemble == GCMCSystem.nve:
+            self._omm_integrator = VerletIntegrator(self.dt)
+        else:
+            raise Exception("Cannot create integrator for (unknown) ensemble")
         self.add_molecules_to_openmm_system()
         self._omm_system.setDefaultPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
         self._omm_context = Context(self._omm_system, self._omm_integrator)
@@ -359,23 +332,25 @@ class GCMCSystem:
         positions = self._omm_state.getPositions(asNumpy=True)
         self._out_file.write("{}\n\n".format(int(len(atoms))))
         for i, atom in enumerate(atoms):
-            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value*10))
+            self._out_file.write("{} {} {} {}\n".format(atom.element, *positions[i]._value * 10))
 
     def initial_output(self):
         self._start_time = time.perf_counter()
         print(" --- OpenGCMC ---")
         print("{} ensemble".format(self.ensemble_to_name[self.ensemble]))
-        print("Cell basis matrix\n[ {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f}\n  {:6.3f} {:6.3f} {:6.3f} ]".format(
-            self._pbc.basis_matrix[0][0],
-            self._pbc.basis_matrix[0][1],
-            self._pbc.basis_matrix[0][2],
-            self._pbc.basis_matrix[1][0],
-            self._pbc.basis_matrix[1][1],
-            self._pbc.basis_matrix[1][2],
-            self._pbc.basis_matrix[2][0],
-            self._pbc.basis_matrix[2][1],
-            self._pbc.basis_matrix[2][2],
-        ))
+        print("Cell basis matrix\n[ {:6.3f} {:6.3f} {:6.3f}\n  "
+              "{:6.3f} {:6.3f} {:6.3f}\n  "
+              "{:6.3f} {:6.3f} {:6.3f} ]".format(
+               self._pbc.basis_matrix[0][0],
+               self._pbc.basis_matrix[0][1],
+               self._pbc.basis_matrix[0][2],
+               self._pbc.basis_matrix[1][0],
+               self._pbc.basis_matrix[1][1],
+               self._pbc.basis_matrix[1][2],
+               self._pbc.basis_matrix[2][0],
+               self._pbc.basis_matrix[2][1],
+               self._pbc.basis_matrix[2][2],
+              ))
         print("dt: {} integrator: {}".format(self.dt, self._omm_integrator.__class__.__name__))
         print("{} atoms in {} molecules".format(self._n, len(self.mols)))
         mol_names = [mol.to_name() for mol in self.mols]
@@ -397,11 +372,14 @@ class GCMCSystem:
         self._omm_state = self._omm_context.getState(**params)
         if self.write_xyz:
             self.output_xyz()
+        kin_energy = self._omm_state.getKineticEnergy()._value
+        pot_energy = self._omm_state.getPotentialEnergy()._value
         print(self.format_string.format(step=self._step,
                                         time=current_time,
-                                        kin_energy=self._omm_state.getKineticEnergy()._value,
-                                        pot_energy=self._omm_state.getPotentialEnergy()._value,
-                                        elapsed_s=time.perf_counter()-self._start_time,
+                                        tot_energy=kin_energy+pot_energy,
+                                        kin_energy=kin_energy,
+                                        pot_energy=pot_energy,
+                                        elapsed_s=time.perf_counter() - self._start_time,
                                         ns_per_day=ns_per_day))
 
     def step(self, steps):

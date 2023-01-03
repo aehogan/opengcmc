@@ -1,4 +1,5 @@
 import numpy as np
+import copy
 
 
 class PBC:
@@ -180,3 +181,61 @@ class Quaternion:
 class Modeler:
     def __init__(self):
         pass
+
+    @staticmethod
+    def overlap_mol_test(input_mol, mol_check_list, pbc):
+        for atom1 in input_mol:
+            for mol2 in mol_check_list:
+                for atom2 in mol2:
+                    r = pbc.min_image(atom1.x - atom2.x)
+                    if r < 3:
+                        return True
+        return False
+
+    @staticmethod
+    def move_mol_randomly(input_mol, pbc):
+        random_rot = Quaternion()
+        random_rot.random_rotation()
+        random_scale = np.random.random(3)
+        random_scale = np.matmul(random_scale, pbc.basis_matrix)
+        for atom in input_mol:
+            atom.x = Quaternion.rotate_3vector(atom.x, random_rot)
+            atom.x += random_scale
+
+    @staticmethod
+    def move_mol_to_com(atoms):
+        com = np.zeros(3)
+        total_mass = 0
+        for atom in atoms:
+            com += atom.x * atom.mass
+            total_mass += atom.mass
+        com /= total_mass
+        for atom in atoms:
+            atom.x -= com
+
+    @staticmethod
+    def point_molecule_down_xaxis(atoms, atom_index):
+
+        pointer_atom = copy.deepcopy(atoms[atom_index])
+
+        xangle = np.arctan2(pointer_atom.x[1], pointer_atom.x[0])
+        qx = Quaternion(0.0, 0.0, 0.0, 1.0)
+        qx.axis_angle(0, 0, 1, -np.rad2deg(xangle))
+
+        pointer_atom.x = Quaternion.rotate_3vector(pointer_atom.x, qx)
+
+        yangle = np.arctan2(pointer_atom.x[2], pointer_atom.x[0])
+        qy = Quaternion(0.0, 0.0, 0.0, 1.0)
+        qy.axis_angle(0, 1, 0, np.rad2deg(yangle))
+
+        pointer_atom.x = Quaternion.rotate_3vector(pointer_atom.x, qy)
+
+        for atom in atoms:
+            atom.x = Quaternion.rotate_3vector(atom.x, qx)
+            atom.x = Quaternion.rotate_3vector(atom.x, qy)
+            atom.x -= pointer_atom.x
+
+    @staticmethod
+    def invert_mol(atoms):
+        for atom in atoms:
+            atom.x = -atom.x
