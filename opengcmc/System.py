@@ -4,10 +4,16 @@ import numpy as np
 import time
 from .Atom import Atom, Molecule
 from .Utils import PBC, Modeler
-from .ForceField import PhahstFF, Sorbate
+from .ForceField import FF, Sorbate, H2
 from openmm import NonbondedForce, CustomNonbondedForce, AmoebaMultipoleForce, \
     System, NoseHooverIntegrator, Context, XmlSerializer, VerletIntegrator
 from openmm.unit import *
+
+
+class Averages:
+    def __init__(self):
+        self.n = []
+        self.u = []
 
 
 class GCMCSystem:
@@ -15,23 +21,39 @@ class GCMCSystem:
     uvt, npt, nvt, nve = range(4)
     ensemble_to_name = {0: "muVT", 1: "NPT", 2: "NVT", 3: "NVE"}
 
-    def __init__(self):
-        self.ensemble = GCMCSystem.nvt
-        self.pressure = 1.0 * atmospheres
-        self.temperature = 298.0 * kelvins
+    def __init__(self, ensemble=None, pressure=1.0*atmospheres, temperature=298.0*kelvins, insert_mol=None,
+                 dt=0.001*picoseconds, freq=1000, xyz_filename=None):
+        if ensemble is None:
+            self.ensemble = GCMCSystem.nvt
+        else:
+            self.ensemble = ensemble
+        if ensemble == GCMCSystem.uvt:
+            if insert_mol is None:
+                self.insert_mol = H2
+            else:
+                self.insert_mol = insert_mol
+        self.pressure = pressure
+        self.temperature = temperature
         # Delta time(step)
-        self.dt = 0.001 * picoseconds
+        self.dt = dt
         # Frequency of output
-        self.freq = 10
+        self.freq = freq
         # Output f-string
-        self.format_string = "Step {step:6d} Time {time:6.2f} ps " \
+        if self.ensemble == GCMCSystem.uvt:
+            self.format_string = "Step {step:6d} PE {pot_energy:10.3f} kJ/mol N {n:4d}"
+        else:
+            self.format_string = "Step {step:6d} Time {time:6.2f} ps " \
                              "TE {tot_energy:10.3f} kJ/mol " \
                              "KE {kin_energy:6.3f} kJ/mol " \
                              "PE {pot_energy:10.3f} kJ/mol " \
                              "Elapsed time {elapsed_s:5.1f}s - {ns_per_day:5.2f} ns/day"
         # Write .xyz flag/filename
-        self.write_xyz = True
-        self.xyz_filename = "out.xyz"
+        if xyz_filename is None:
+            self.write_xyz = False
+            self.xyz_filename = ""
+        else:
+            self.write_xyz = True
+            self.xyz_filename = xyz_filename
         # list of Molecule objects
         self.mols = []
         # Current number of atoms
@@ -42,8 +64,9 @@ class GCMCSystem:
         # internal objects
         self._pbc = None
         self._out_file = None
-        self._ff = PhahstFF()
+        self._ff = FF.phahst
         self._start_time = time.perf_counter()
+        self._averages = Averages()
 
         # OpenMM objects
         self._omm_system = None
@@ -86,19 +109,39 @@ class GCMCSystem:
                 atom = Atom(x, y, z, name, self._n, charge=charge)
                 self._n += 1
                 mof.append(atom)
-            self._ff.apply_ff(mof.atoms, self._ff.phahst)
+            FF.apply_ff(mof.atoms, self._ff)
             self.mols.append(mof)
 
-    def add_sorbate(self, sorbate_class):
-        if not issubclass(sorbate_class, Sorbate):
+    def add_sorbate(self):
+        if not issubclass(self.insert_mol, Sorbate):
             raise Exception("Sorbate not member of Sorbate base class from ForceField.py")
-        sorbate = sorbate_class(self._n)
+        sorbate = self.insert_mol(self._n)
         while Modeler.overlap_mol_test(sorbate.molecule, self.mols, self._pbc):
             Modeler.move_mol_randomly(sorbate.molecule, self._pbc)
         for constraint in sorbate.constraints:
             self._constraints.append(constraint)
         self._n += len(sorbate.molecule)
         self.mols.append(sorbate.molecule)
+
+    def fill_with_sorbate(self):
+        if not issubclass(self.insert_mol, Sorbate):
+            raise Exception("Sorbate not member of Sorbate base class from ForceField.py")
+        for _ in range(10):
+            keep_looping = True
+            while keep_looping:
+                sorbate = self.insert_mol(self._n)
+                trys = 0
+                while Modeler.overlap_mol_test(sorbate.molecule, self.mols, self._pbc):
+                    Modeler.move_mol_randomly(sorbate.molecule, self._pbc)
+                    trys += 1
+                    if trys > 1000:
+                        keep_looping = False
+                        break
+                if keep_looping:
+                    for constraint in sorbate.constraints:
+                        self._constraints.append(constraint)
+                    self._n += len(sorbate.molecule)
+                    self.mols.append(sorbate.molecule)
 
     def add_molecules_to_openmm_system(self):
         for mol in self.mols:
@@ -146,6 +189,11 @@ class GCMCSystem:
         for constraint in self._constraints:
             self._omm_system.addConstraint(*constraint)
 
+    def _set_positions(self):
+        positions = np.row_stack([mol.get_positions() for mol in self.mols])
+        positions *= nanometers / 10
+        self._omm_context.setPositions(positions)
+
     def create_openmm_context(self):
         self._start_time = time.perf_counter()
         self._omm_system = System()
@@ -175,11 +223,12 @@ class GCMCSystem:
             "invR4 = invR2*invR2;"
             "invR2 = invR*invR;"
             "invR = 1.0/r;"
-            "invbeta = 1.0/beta;"
             "c6 = sqrt(c61*c62);"
             "c8 = sqrt(c81*c82);"
             "c10 = sqrt(c101*c102);"
-            "beta = 2.0*beta1*beta2/(beta1+beta2);"
+            "invbeta = select(beta, 1.0/beta, 0);"
+            "beta = select(beta_mix, 2.0*beta_mix/(beta1+beta2), 0);"
+            "beta_mix = beta1*beta2;"
             "rho = 0.5*(rho1+rho2);"
         )
         tt_force.addPerParticleParameter("c6")
@@ -197,23 +246,47 @@ class GCMCSystem:
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
         self._omm_system.addForce(mp_force)
-        if self.ensemble == GCMCSystem.nvt or self.ensemble == GCMCSystem.npt or self.ensemble == GCMCSystem.uvt:
+        if self.ensemble == GCMCSystem.nvt or self.ensemble == GCMCSystem.npt:
             self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
-        elif self.ensemble == GCMCSystem.nve:
+        elif self.ensemble == GCMCSystem.nve or self.ensemble == GCMCSystem.uvt:
             self._omm_integrator = VerletIntegrator(self.dt)
         else:
             raise Exception("Cannot create integrator for (unknown) ensemble")
         self.add_molecules_to_openmm_system()
         self._omm_system.setDefaultPeriodicBoxVectors(*(self._pbc.basis_matrix * nanometers / 10))
         self._omm_context = Context(self._omm_system, self._omm_integrator)
-        positions = np.row_stack([mol.get_positions() for mol in self.mols])
-        positions *= nanometers / 10
-        self._omm_context.setPositions(positions)
-        self._omm_context.setVelocitiesToTemperature(298)
+        self._set_positions()
+        self._omm_context.setVelocitiesToTemperature(self.temperature)
         f = open("state.xml", "w")
         f.write(XmlSerializer.serialize(self._omm_system))
         f.close()
         print("OpenMM Context creation time {:5.2f} s".format(time.perf_counter()-self._start_time))
+
+    def create_new_mol(self):
+        self.add_sorbate()
+        mol = self.mols[-1]
+        for atom in mol:
+            self._omm_system.addParticle(atom.mass)
+        for force in self._omm_system.getForces():
+            if isinstance(force, NonbondedForce):
+                for atom in mol:
+                    force.addParticle(atom.charge, atom.lj_sigma, atom.lj_epsilon)
+            elif isinstance(force, CustomNonbondedForce):
+                for atom in mol:
+                    force.addParticle((atom.c6, atom.c8, atom.c10, atom.beta, atom.rho))
+            elif isinstance(force, AmoebaMultipoleForce):
+                for atom in mol:
+                    force.addMultipole(atom.charge,
+                                       (0.0, 0.0, 0.0),
+                                       (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                                       AmoebaMultipoleForce.NoAxisType,
+                                       -1, -1, -1,
+                                       0.39,  # Thole damping parameter
+                                       atom.alpha ** (1 / 6),
+                                       atom.alpha
+                                       )
+        self._omm_context.reinitialize()
+        self._set_positions()
 
     def output_xyz(self):
         if self._out_file is None:
@@ -266,26 +339,31 @@ class GCMCSystem:
             self.output_xyz()
         kin_energy = self._omm_state.getKineticEnergy().value_in_unit(kilojoule_per_mole)
         pot_energy = self._omm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+        nonfrozen_mols = [mol for mol in self.mols if not mol.frozen and not mol.ghost]
         print(self.format_string.format(step=self._step,
                                         time=current_time * 1000,  # ns to ps
                                         tot_energy=kin_energy+pot_energy,
                                         kin_energy=kin_energy,
                                         pot_energy=pot_energy,
                                         elapsed_s=time.perf_counter() - self._start_time,
-                                        ns_per_day=ns_per_day))
+                                        ns_per_day=ns_per_day,
+                                        n=len(nonfrozen_mols)))
 
     def step(self, steps):
+        if self._omm_integrator is None:
+            raise Exception("Integrator doesn't exist (add molecules and "
+                            "call create_openmm_context() first)")
+        if self._step == 0:
+            self.output()
+
         if self.ensemble == GCMCSystem.uvt:
-            self.hybrid_mc_step(steps)
+            for _ in range(steps):
+                self.hybrid_mc_step(1)
         else:
             self.md_step(steps)
 
     def md_step(self, steps):
-        if self._omm_integrator is None:
-            raise Exception("Integrator doesn't exist (add molecules and"
-                            "call create_openmm_context() first)")
-        if self._step == 0:
-            self.output()
+
         total_steps = self._step + steps
         while self._step < total_steps:
             if self._step + self.freq <= total_steps:
@@ -297,12 +375,7 @@ class GCMCSystem:
             self.output()
 
     def hybrid_mc_step(self, steps, md_steps=100):
-        if self._omm_integrator is None:
-            raise Exception("Integrator doesn't exist (add molecules and"
-                            "call create_openmm_context() first)")
 
-        if self._step == 0:
-            self.output()
         total_steps = self._step + steps
         while self._step < total_steps:
 
@@ -324,5 +397,122 @@ class GCMCSystem:
             if self._step % self.freq == 0:
                 self.output()
 
+    '''
+        def unghost_mol(self, mol: Molecule):
+        mol.ghost = False
+        for force in self._omm_system.getForces():
+            if isinstance(force, NonbondedForce):
+                for atom in mol:
+                    force.setParticleParameters(atom.id, atom.charge, atom.lj_sigma, atom.lj_epsilon)
+            elif isinstance(force, CustomNonbondedForce):
+                for atom in mol:
+                    force.setParticleParameters(atom.id, (atom.c6, atom.c8, atom.c10, atom.beta, atom.rho))
+            elif isinstance(force, AmoebaMultipoleForce):
+                for atom in mol:
+                    force.setMultipoleParameters(atom.id, atom.charge,
+                                                 (0.0, 0.0, 0.0),
+                                                 (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                                                 AmoebaMultipoleForce.NoAxisType,
+                                                 -1, -1, -1,
+                                                 0.39,  # Thole damping parameter
+                                                 atom.alpha ** (1 / 6),
+                                                 atom.alpha
+                                                 )
+            force.updateParametersInContext(self._omm_context)
+        for atom in mol:
+            self._omm_system.setParticleMass(atom.id, atom.mass)
+
+
+    def ghost_mol(self, mol: Molecule):
+        mol.ghost = True
+        for force in self._omm_system.getForces():
+            if isinstance(force, NonbondedForce):
+                for atom in mol:
+                    force.setParticleParameters(atom.id, 0.0, 0.0, 0.0)
+            elif isinstance(force, CustomNonbondedForce):
+                for atom in mol:
+                    force.setParticleParameters(atom.id, (0.0, 0.0, 0.0, 0.0, 0.0))
+            elif isinstance(force, AmoebaMultipoleForce):
+                for atom in mol:
+                    force.setMultipoleParameters(atom.id, 0.0,
+                                                 (0.0, 0.0, 0.0),
+                                                 (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                                                 AmoebaMultipoleForce.NoAxisType,
+                                                 -1, -1, -1,
+                                                 0.39,  # Thole damping parameter
+                                                 0.0,
+                                                 0.0
+                                                 )
+            force.updateParametersInContext(self._omm_context)
+        for atom in mol:
+            self._omm_system.setParticleMass(atom.id, 0.0)
+    
+    
     def muvt_steps(self, steps):
-        pass
+
+        total_steps = self._step + steps
+        while self._step < total_steps:
+            self._omm_state = self._omm_context.getState(getEnergy=True, getPositions=True)
+            old_pot_energy = self._omm_state.getPotentialEnergy()
+            old_positions = self._omm_state.getPositions(asNumpy=True)
+
+            if np.random.random() > 0.5:
+                # delete
+                mol_indices = [i for i, mol in enumerate(self.mols) if not mol.frozen and not mol.ghost]
+                if len(mol_indices) == 0:
+                    continue
+                chosen_mol = np.random.choice(mol_indices)
+                self.ghost_mol(self.mols[chosen_mol])
+                new_state = self._omm_context.getState(getEnergy=True)
+                new_pot_energy = new_state.getPotentialEnergy()
+                delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
+                          old_pot_energy.value_in_unit(kilojoule_per_mole)
+                boltzmann_factor = self.temperature.value_in_unit(kelvins) * len(mol_indices) \
+                                   / (self._pbc.volume * self.pressure.value_in_unit(atmospheres) * 0.0073389366) *\
+                                   np.exp(-delta_e / (self.temperature.value_in_unit(kelvins) * 0.008314462618))
+                #print("deleting mol {} before {} after {} bf {}".format(chosen_mol, old_pot_energy, new_pot_energy, boltzmann_factor))
+                if random.random() > boltzmann_factor:
+                    self.unghost_mol(self.mols[chosen_mol])
+                    #print("undo deleting")
+                else:
+                    self._omm_context.reinitialize()
+                    self._omm_context.setPositions(old_positions)
+                    self._omm_context.setVelocitiesToTemperature(self.temperature)
+
+            else:
+                # insert
+                mol_indices = [i for i, mol in enumerate(self.mols) if not mol.frozen and mol.ghost]
+                if len(mol_indices) == 0:
+                    self.create_new_mol()
+                    chosen_mol = len(self.mols) - 1
+                    self._omm_context.reinitialize()
+                else:
+                    chosen_mol = np.random.choice(mol_indices)
+                    self.unghost_mol(self.mols[chosen_mol])
+                Modeler.move_mol_randomly(self.mols[chosen_mol], self._pbc)
+                positions = np.row_stack([mol.get_positions() for mol in self.mols])
+                positions *= nanometers / 10
+                self._omm_context.setPositions(positions)
+                new_state = self._omm_context.getState(getEnergy=True)
+                new_pot_energy = new_state.getPotentialEnergy()
+                delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
+                          old_pot_energy.value_in_unit(kilojoule_per_mole)
+                if delta_e < 1e4:
+                    boltzmann_factor = (self._pbc.volume * self.pressure.value_in_unit(atmospheres) * 0.0073389366) / \
+                                       (self.temperature.value_in_unit(kelvins) * (len(mol_indices)+1)) * \
+                                        np.exp(-delta_e / (self.temperature.value_in_unit(kelvins) * 0.008314462618))
+                else:
+                    boltzmann_factor = 0.0
+                #print("inserting mol {} before {} after {} bf {}".format(chosen_mol, old_pot_energy, new_pot_energy, boltzmann_factor))
+
+                if np.random.random() > boltzmann_factor:
+                    #print("undo insert")
+                    self.ghost_mol(self.mols[chosen_mol])
+                else:
+                    pass
+
+
+            self._step += 1
+            if self._step % self.freq == 0:
+                self.output()
+    '''

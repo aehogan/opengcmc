@@ -78,21 +78,28 @@ class Atom:
 
 
 class Molecule:
-    def __init__(self, name="mol", atoms=None, frozen=False):
+    def __init__(self, name="mol", atoms=None, frozen=False, ghost=False):
         if atoms is None:
             atoms = []
         self.name = str(name)
         self.atoms = atoms
         self.frozen = frozen
+        self.ghost = ghost
+        self.mass = np.sum([atom.mass for atom in self.atoms])
+
+    def update_mass(self):
+        self.mass = np.sum([atom.mass for atom in self.atoms])
 
     def append(self, atom):
         self.atoms.append(atom)
+        self.update_mass()
 
     def __getitem__(self, i):
         return self.atoms[i]
 
     def __setitem__(self, key, value):
         self.atoms[key] = value
+        self.update_mass()
 
     def __len__(self):
         return len(self.atoms)

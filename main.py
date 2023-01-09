@@ -3,15 +3,11 @@
 from opengcmc import GCMCSystem, H2
 from openmm.unit import *
 
-system = GCMCSystem()
+system = GCMCSystem(ensemble=GCMCSystem.uvt, xyz_filename="out.xyz", insert_mol=H2, pressure=1000*atmospheres)
 system.load_material_xyz("hkust1.xyz")
-for _ in range(100):
-    system.add_sorbate(H2)
-system.dt = 0.002 * picoseconds
-system.temperature = 50 * kelvin
-# system.ensemble = GCMCSystem.nve
+for _ in range(10):
+    system.add_sorbate()
+# system.fill_with_sorbate()
 system.create_openmm_context()
-# system.freq = 100
-# system.step(1000)
-system.freq = 10
-system.hybrid_mc_step(1000)
+system.freq = 100
+system.step(1000)

@@ -18,11 +18,11 @@ class H2(Sorbate):
                              virtual_type=TwoParticleAverageSite(base_id + 1, base_id + 2, 0.5, 0.5)))
         self.molecule.append(Atom(0.371, 0.0, 0.0, "H2", atom_id=base_id + 1, charge=0.423083))
         self.molecule.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=base_id + 2, charge=0.423083))
-        PhahstFF.apply_ff(self.molecule, PhahstFF.phahst_h2)
+        FF.apply_ff(self.molecule, FF.phahst_h2)
         self.constraints.append([base_id + 1, base_id + 2, 2 * 0.371 / 10])
 
 
-class PhahstFF:
+class FF:
     phahst = {
         "Cu": {
             "mass": 63.54630 * amu,
