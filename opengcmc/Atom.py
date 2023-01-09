@@ -78,13 +78,12 @@ class Atom:
 
 
 class Molecule:
-    def __init__(self, name="mol", atoms=None, frozen=False, ghost=False):
+    def __init__(self, name="mol", atoms=None, frozen=False):
         if atoms is None:
             atoms = []
         self.name = str(name)
         self.atoms = atoms
         self.frozen = frozen
-        self.ghost = ghost
         self.mass = np.sum([atom.mass for atom in self.atoms])
 
     def update_mass(self):

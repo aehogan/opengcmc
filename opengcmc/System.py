@@ -12,7 +12,9 @@ from openmm.unit import *
 
 class Averages:
     def __init__(self):
+        # number of sorbates
         self.n = []
+        # potential energy
         self.u = []
 
 
@@ -60,6 +62,8 @@ class GCMCSystem:
         self._n = 0
         # Current step number
         self._step = 0
+        # 1/kT in mol/(kJ*K)
+        self._beta = 1 / (self.temperature.value_in_unit(kelvins) * 8.314462618e-3)
 
         # internal objects
         self._pbc = None
@@ -245,7 +249,7 @@ class GCMCSystem:
         mp_force.setNonbondedMethod(AmoebaMultipoleForce.PME)
         mp_force.setPolarizationType(AmoebaMultipoleForce.Extrapolated)
         mp_force.setCutoffDistance(0.9)
-        self._omm_system.addForce(mp_force)
+        #self._omm_system.addForce(mp_force)
         if self.ensemble == GCMCSystem.nvt or self.ensemble == GCMCSystem.npt:
             self._omm_integrator = NoseHooverIntegrator(self.temperature, 1 / picosecond, self.dt)
         elif self.ensemble == GCMCSystem.nve or self.ensemble == GCMCSystem.uvt:
@@ -262,7 +266,7 @@ class GCMCSystem:
         f.close()
         print("OpenMM Context creation time {:5.2f} s".format(time.perf_counter()-self._start_time))
 
-    def create_new_mol(self):
+    def add_sorbate_to_existing_context(self):
         self.add_sorbate()
         mol = self.mols[-1]
         for atom in mol:
@@ -339,7 +343,7 @@ class GCMCSystem:
             self.output_xyz()
         kin_energy = self._omm_state.getKineticEnergy().value_in_unit(kilojoule_per_mole)
         pot_energy = self._omm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
-        nonfrozen_mols = [mol for mol in self.mols if not mol.frozen and not mol.ghost]
+        nonfrozen_mols = [mol for mol in self.mols if not mol.frozen]
         print(self.format_string.format(step=self._step,
                                         time=current_time * 1000,  # ns to ps
                                         tot_energy=kin_energy+pot_energy,
@@ -357,8 +361,7 @@ class GCMCSystem:
             self.output()
 
         if self.ensemble == GCMCSystem.uvt:
-            for _ in range(steps):
-                self.hybrid_mc_step(1)
+             self.hybrid_mc_step(steps)
         else:
             self.md_step(steps)
 
@@ -374,7 +377,7 @@ class GCMCSystem:
             self._step += delta_steps
             self.output()
 
-    def hybrid_mc_step(self, steps, md_steps=100):
+    def hybrid_mc_step(self, steps, md_steps=100, do_averaging=False):
 
         total_steps = self._step + steps
         while self._step < total_steps:
@@ -388,131 +391,65 @@ class GCMCSystem:
             new_pot_energy = new_state.getPotentialEnergy()
             delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
                       old_pot_energy.value_in_unit(kilojoule_per_mole)
-            boltzmann_factor = np.exp(-delta_e/(self.temperature.value_in_unit(kelvins) * 0.008314462618))
+            try:
+                boltzmann_factor = np.exp(-delta_e/(self.temperature.value_in_unit(kelvins) * 0.008314462618))
+            except RuntimeWarning:
+                boltzmann_factor = 0.0
 
             if random.random() > boltzmann_factor:
                 self._omm_context.setPositions(old_positions)
-
-            self._step += 1
-            if self._step % self.freq == 0:
-                self.output()
-
-    '''
-        def unghost_mol(self, mol: Molecule):
-        mol.ghost = False
-        for force in self._omm_system.getForces():
-            if isinstance(force, NonbondedForce):
-                for atom in mol:
-                    force.setParticleParameters(atom.id, atom.charge, atom.lj_sigma, atom.lj_epsilon)
-            elif isinstance(force, CustomNonbondedForce):
-                for atom in mol:
-                    force.setParticleParameters(atom.id, (atom.c6, atom.c8, atom.c10, atom.beta, atom.rho))
-            elif isinstance(force, AmoebaMultipoleForce):
-                for atom in mol:
-                    force.setMultipoleParameters(atom.id, atom.charge,
-                                                 (0.0, 0.0, 0.0),
-                                                 (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                                                 AmoebaMultipoleForce.NoAxisType,
-                                                 -1, -1, -1,
-                                                 0.39,  # Thole damping parameter
-                                                 atom.alpha ** (1 / 6),
-                                                 atom.alpha
-                                                 )
-            force.updateParametersInContext(self._omm_context)
-        for atom in mol:
-            self._omm_system.setParticleMass(atom.id, atom.mass)
-
-
-    def ghost_mol(self, mol: Molecule):
-        mol.ghost = True
-        for force in self._omm_system.getForces():
-            if isinstance(force, NonbondedForce):
-                for atom in mol:
-                    force.setParticleParameters(atom.id, 0.0, 0.0, 0.0)
-            elif isinstance(force, CustomNonbondedForce):
-                for atom in mol:
-                    force.setParticleParameters(atom.id, (0.0, 0.0, 0.0, 0.0, 0.0))
-            elif isinstance(force, AmoebaMultipoleForce):
-                for atom in mol:
-                    force.setMultipoleParameters(atom.id, 0.0,
-                                                 (0.0, 0.0, 0.0),
-                                                 (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                                                 AmoebaMultipoleForce.NoAxisType,
-                                                 -1, -1, -1,
-                                                 0.39,  # Thole damping parameter
-                                                 0.0,
-                                                 0.0
-                                                 )
-            force.updateParametersInContext(self._omm_context)
-        for atom in mol:
-            self._omm_system.setParticleMass(atom.id, 0.0)
-    
-    
-    def muvt_steps(self, steps):
-
-        total_steps = self._step + steps
-        while self._step < total_steps:
-            self._omm_state = self._omm_context.getState(getEnergy=True, getPositions=True)
-            old_pot_energy = self._omm_state.getPotentialEnergy()
-            old_positions = self._omm_state.getPositions(asNumpy=True)
-
-            if np.random.random() > 0.5:
-                # delete
-                mol_indices = [i for i, mol in enumerate(self.mols) if not mol.frozen and not mol.ghost]
-                if len(mol_indices) == 0:
-                    continue
-                chosen_mol = np.random.choice(mol_indices)
-                self.ghost_mol(self.mols[chosen_mol])
-                new_state = self._omm_context.getState(getEnergy=True)
-                new_pot_energy = new_state.getPotentialEnergy()
-                delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
-                          old_pot_energy.value_in_unit(kilojoule_per_mole)
-                boltzmann_factor = self.temperature.value_in_unit(kelvins) * len(mol_indices) \
-                                   / (self._pbc.volume * self.pressure.value_in_unit(atmospheres) * 0.0073389366) *\
-                                   np.exp(-delta_e / (self.temperature.value_in_unit(kelvins) * 0.008314462618))
-                #print("deleting mol {} before {} after {} bf {}".format(chosen_mol, old_pot_energy, new_pot_energy, boltzmann_factor))
-                if random.random() > boltzmann_factor:
-                    self.unghost_mol(self.mols[chosen_mol])
-                    #print("undo deleting")
-                else:
-                    self._omm_context.reinitialize()
-                    self._omm_context.setPositions(old_positions)
-                    self._omm_context.setVelocitiesToTemperature(self.temperature)
-
+                if do_averaging and self.ensemble == GCMCSystem.uvt:
+                    n = len([1 for mol in self.mols if not mol.frozen])
+                    self._averages.n.append(n)
+                    self._averages.u.append(old_pot_energy.value_in_unit(kilojoule_per_mole))
             else:
-                # insert
-                mol_indices = [i for i, mol in enumerate(self.mols) if not mol.frozen and mol.ghost]
-                if len(mol_indices) == 0:
-                    self.create_new_mol()
-                    chosen_mol = len(self.mols) - 1
-                    self._omm_context.reinitialize()
-                else:
-                    chosen_mol = np.random.choice(mol_indices)
-                    self.unghost_mol(self.mols[chosen_mol])
-                Modeler.move_mol_randomly(self.mols[chosen_mol], self._pbc)
-                positions = np.row_stack([mol.get_positions() for mol in self.mols])
-                positions *= nanometers / 10
-                self._omm_context.setPositions(positions)
-                new_state = self._omm_context.getState(getEnergy=True)
-                new_pot_energy = new_state.getPotentialEnergy()
-                delta_e = new_pot_energy.value_in_unit(kilojoule_per_mole) - \
-                          old_pot_energy.value_in_unit(kilojoule_per_mole)
-                if delta_e < 1e4:
-                    boltzmann_factor = (self._pbc.volume * self.pressure.value_in_unit(atmospheres) * 0.0073389366) / \
-                                       (self.temperature.value_in_unit(kelvins) * (len(mol_indices)+1)) * \
-                                        np.exp(-delta_e / (self.temperature.value_in_unit(kelvins) * 0.008314462618))
-                else:
-                    boltzmann_factor = 0.0
-                #print("inserting mol {} before {} after {} bf {}".format(chosen_mol, old_pot_energy, new_pot_energy, boltzmann_factor))
-
-                if np.random.random() > boltzmann_factor:
-                    #print("undo insert")
-                    self.ghost_mol(self.mols[chosen_mol])
-                else:
-                    pass
-
+                if do_averaging and self.ensemble == GCMCSystem.uvt:
+                    n = len([1 for mol in self.mols if not mol.frozen])
+                    self._averages.n.append(n)
+                    self._averages.u.append(new_pot_energy.value_in_unit(kilojoule_per_mole))
 
             self._step += 1
             if self._step % self.freq == 0:
                 self.output()
-    '''
+
+    def build_isotherm(self):
+        assert len([1 for mol in self.mols if not mol.frozen]) == 0
+        self._averages.u = []
+        self._averages.n = []
+
+        if self._step == 0:
+            self.output()
+
+        for _ in range(2):
+            self.add_sorbate_to_existing_context()
+            self.hybrid_mc_step(1000)
+            self.hybrid_mc_step(1000, do_averaging=True)
+
+        for pressure in np.linspace(0.01, 10.0, 10):
+
+            fugacity_coeff = 1.0
+            h = 6.62607015e-34  # J * s
+            nonfrozen_mols = [mol for mol in self.mols if not mol.frozen]
+            m = np.sum([atom.mass for atom in nonfrozen_mols[-1]])
+            m *= 1.66054e-27  # kg
+            kB = 1.380649e-23  # J/K
+            thermal_de_Broglie = np.sqrt(h*h / (2 * np.pi * m * kB * self.temperature.value_in_unit(kelvins)))  # m
+            mu = 1.0/self._beta * np.log(fugacity_coeff * self.pressure.value_in_unit(pascals) * thermal_de_Broglie**3
+                                         / (kB * self.temperature.value_in_unit(kelvins)))  # J
+            mu *= 8.314462618e-3 / 1.380649e-23  # to kJ/mol
+            print(thermal_de_Broglie, mu)
+
+            self._averages.p = []
+            for i, u in enumerate(self._averages.u):
+                n = self._averages.n[i]
+                p = np.exp(-self._beta*u + self._beta*n*mu)
+                self._averages.p.append(p)
+
+            average_u = 0.0
+            average_n = 0.0
+            for i, p in enumerate(self._averages.p):
+                average_u += p * self._averages.u[i]
+                average_n += p * self._averages.n[i]
+            average_u /= np.sum(self._averages.p)
+            average_n /= np.sum(self._averages.p)
+            print(pressure, average_u, average_n)

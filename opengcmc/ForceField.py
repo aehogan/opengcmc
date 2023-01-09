@@ -1,4 +1,5 @@
 
+import numpy as np
 from .Atom import Atom, Molecule
 from openmm import TwoParticleAverageSite
 from openmm.unit import *
@@ -20,6 +21,13 @@ class H2(Sorbate):
         self.molecule.append(Atom(-0.371, 0.0, 0.0, "H2", atom_id=base_id + 2, charge=0.423083))
         FF.apply_ff(self.molecule, FF.phahst_h2)
         self.constraints.append([base_id + 1, base_id + 2, 2 * 0.371 / 10])
+
+
+class Ne(Sorbate):
+    def __init__(self, base_id):
+        super().__init__(base_id)
+        self.molecule.append(Atom(0.0, 0.0, 0.0, "Ne", atom_id=base_id))
+        FF.apply_ff(self.molecule, FF.phahst_noble_gas)
 
 
 class FF:
@@ -80,6 +88,18 @@ class FF:
             "c6": 0.0,
             "c8": 0.0,
             "c10": 0.0,
+        }
+    }
+
+    phahst_noble_gas = {
+        "Ne": {
+            "mass": 20.18000 * amu,
+            "alpha": 0.3823 * angstroms ** 3,
+            "rho": 2.80240 * angstroms,
+            "beta": 4.99432 / angstroms,
+            "c6": 6.21275 * 2625.5 / 18.8973 ** 6,
+            "c8": 67.98647 * 2625.5 / 18.8973 ** 8,
+            "c10": 911.37600 * 2625.5 / 18.8973 ** 10,
         }
     }
 
